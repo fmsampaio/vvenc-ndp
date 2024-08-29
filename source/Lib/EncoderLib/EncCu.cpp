@@ -60,6 +60,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/TimeProfiler.h"
 #include "CommonLib/SearchSpaceCounter.h"
 
+#include "NdpEncoderOptimizer.h"
+
 #include <mutex>
 #include <cmath>
 #include <algorithm>
@@ -351,6 +353,9 @@ void EncCu::encodeCtu( Picture* pic, int (&prevQP)[MAX_NUM_CH], uint32_t ctuXPos
   {
     m_syncPicCtx[slice->pps->getTileLineId( ctuXPosInCtus, ctuYPosInCtus )] = m_CABACEstimator->getCtx();
   }
+
+  // NDP: tracing CTUs encoded data 
+  NdpEncoderOptimizer::traceCtuCodingInfo(cs, ctuArea);
 
   DTRACE_AREA_CRC( g_trace_ctx, D_CRC, cs, ctuArea );
 }
