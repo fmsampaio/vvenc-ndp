@@ -2,6 +2,9 @@
 
 namespace vvenc {
 
+static const int HALF_POS[16] = {0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3};
+static const int QUARTER_POS[16] = {0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3};
+
 static int PREF_FRAC_GLOBAL = 12;
 
 void NdpEncoderOptimizer::traceCtuCodingInfo(const CodingStructure& cs, const UnitArea& ctuArea) {
@@ -73,6 +76,39 @@ int NdpEncoderOptimizer::xGetFracPosition(Mv shiftMv) {
     int fracPosition = (xQuarterMV << 2) | yQuarterMV;
 
     return fracPosition;
+}
+
+int NdpEncoderOptimizer::getPrefFrac() { 
+    return PREF_FRAC_GLOBAL; 
+}
+
+int NdpEncoderOptimizer::getHalfPosition(int fracPos) {
+    if(fracPos == -1)
+        return -1;
+    return HALF_POS[fracPos];
+}
+
+int NdpEncoderOptimizer::getFracPosition(Mv mv, MvPrecision precision) {
+    if(precision == MvPrecision::MV_PRECISION_HALF) {
+        mv <<= 1;
+    }
+    return xGetFracPosition(mv);
+}
+
+std::string NdpEncoderOptimizer::mvToStr(Mv mv) {
+    std::string returnable = "(" + std::to_string(mv.hor) + "," + std::to_string(mv.ver) + ")";
+    return returnable;
+}
+
+Mv NdpEncoderOptimizer::shiftMvFromInternalToQuarter(Mv &origMv) {
+    const int nShift = MV_FRACTIONAL_BITS_DIFF;
+    const int nOffset = 1 << (nShift - 1);
+
+    Mv shiftMv;
+    shiftMv.hor = origMv.hor >= 0 ? (origMv.hor + nOffset) >> nShift : -((-origMv.hor + nOffset) >> nShift);
+    shiftMv.ver = origMv.ver >= 0 ? (origMv.ver + nOffset) >> nShift : -((-origMv.ver + nOffset) >> nShift);
+
+    return shiftMv;
 }
 
 }

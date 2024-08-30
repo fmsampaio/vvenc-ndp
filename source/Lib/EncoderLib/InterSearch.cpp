@@ -58,6 +58,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "CommonLib/dtrace_buffer.h"
 #include "CommonLib/TimeProfiler.h"
 
+#include "NdpEncoderOptimizer.h"
+
 #include <math.h>
 
  //! \ingroup EncoderLib
@@ -770,6 +772,10 @@ Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
   uint32_t        uiDirecBest = 0;
   const int reduceTap = m_pcEncCfg->m_meReduceTap;
 
+  // NDP Optimization
+  int prefFrac = NdpEncoderOptimizer::getPrefFrac();
+  int prefFracHalf = NdpEncoderOptimizer::getHalfPosition(prefFrac);
+
   Pel*  piRefPos;
   int iRefStride = pcPatternKey->width + 1;
   m_pcRdCost->setDistParam( m_cDistParam, *pcPatternKey, m_filteredBlock[0][0][0], iRefStride, m_lumaClpRng.bd, COMP_Y, 0, m_pcEncCfg->m_bUseHADME ? ( m_pcEncCfg->m_fastHad ? 2 : 1 ) : 0 );
@@ -802,7 +808,7 @@ Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
         continue;
       }
 
-      if( 2 == iFrac )
+      if( 2 == iFrac ) //Half-pixel
       {
         if ( ( 5 == i && 0 == uiDirecBest ) || ( 7 == i && 1 == uiDirecBest ) || ( 8 == i && ( 1 == uiDirecBest || 3 == uiDirecBest || 5 == uiDirecBest ) ) )
         {
@@ -850,6 +856,35 @@ Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
     Mv cMvTest = pcMvRefine[ i ];
     cMvTest += baseRefMv;
 
+    // NDP Optimization
+    int currFracPos;
+    if(iFrac == 2) { // Half-pel
+      currFracPos = NdpEncoderOptimizer::getFracPosition(cMvTest, MvPrecision::MV_PRECISION_HALF);
+      int currFracPosHalf = NdpEncoderOptimizer::getHalfPosition(currFracPos);
+
+      // std::cout << "HPel: " << NdpEncoderOptimizer::mvToStr(cMvTest) << " " << currFracPos << " " << currFracPosHalf << " --> "; // for debug
+      if(prefFrac != -1 && currFracPosHalf != prefFracHalf) { // skipping fractional position evaluation
+        // std::cout << "Skip\n";
+        continue;
+      }
+      // else {
+      //   std::cout << std::endl;
+      // }
+    }
+    else { // iFrac == 1 Quarter-pel
+      currFracPos = NdpEncoderOptimizer::getFracPosition(cMvTest, MvPrecision::MV_PRECISION_QUARTER);
+ 
+      // for debug
+      // std::cout << "QPel: " << NdpEncoderOptimizer::mvToStr(cMvTest) << " " << currFracPos << " --> ";
+      if(prefFrac != -1 && currFracPos != prefFrac) { // skipping fractional position evaluation
+        // std::cout << "Skip\n";
+        continue;
+      }
+      // else {
+      //   std::cout << std::endl;
+      // }
+    }
+    
     int horVal = cMvTest.hor * iFrac;
     int verVal = cMvTest.ver * iFrac;
     piRefPos = m_filteredBlock[verVal & 3][horVal & 3][0];
@@ -966,6 +1001,18 @@ Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
     }
   }
 
+  // for debug 
+  int bestFracPosition;
+
+  Mv bestMv = rcMvFrac + baseRefMv;
+  if(iFrac == 2) {
+    bestFracPosition = NdpEncoderOptimizer::getFracPosition(bestMv, MvPrecision::MV_PRECISION_HALF);
+  }
+  else {
+    bestFracPosition = NdpEncoderOptimizer::getFracPosition(bestMv, MvPrecision::MV_PRECISION_QUARTER);
+  }
+  std::cout << (iFrac == 2 ? "BestHPel: (" : "BestQPel: (") << bestMv.hor << "," << bestMv.ver << ") [" << bestFracPosition << "x" << prefFrac << "]\n";    
+
   return uiDistBest;
 }
 
@@ -974,6 +1021,12 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
 {
   PROFILER_SCOPE_AND_STAGE_EXT( 1, _TPROF, P_INTER_MVD_SEARCH, cu.cs, partitioner.chType );
   CodingStructure& cs = *cu.cs;
+
+  // NDP Optimization
+  std::cout << "[Init] PredInter: [" << cu.slice->poc << "] " 
+    << (partitioner.chType == ChannelType::CH_L ? "L" : "C")  <<
+    " (" << cu.lx() << "," << cu.ly() << ") [" 
+    << cu.lwidth() << "x" << cu.lheight() << "]\n";
 
   AMVPInfo     amvp[2];
   Mv           cMvSrchRngLT;
@@ -1017,7 +1070,8 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
   uint32_t     uiLastModeTemp = 0;
   Distortion   uiAffineCost = MAX_DISTORTION;
   Distortion   uiHevcCost = MAX_DISTORTION;
-  bool checkAffine = (cu.imv == 0);
+  // bool checkAffine = (cu.imv == 0);
+  bool checkAffine = false;
   if (cu.cs->bestParent != nullptr && cu.cs->bestParent->getCU(CH_L,TREE_D) != nullptr && cu.cs->bestParent->getCU(CH_L,TREE_D)->affine == false)
   {
     m_skipPROF = true;
@@ -1041,10 +1095,10 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
     }
     uint32_t         uiBitsTempL0[MAX_NUM_REF];
 
-    Mv           mvValidList1;
-    int          refIdxValidList1 = 0;
-    uint32_t         bitsValidList1   = MAX_UINT;
-    Distortion   costValidList1   = MAX_DISTORTION;
+    // Mv           mvValidList1;
+    // int          refIdxValidList1 = 0;
+    // uint32_t         bitsValidList1   = MAX_UINT;
+    // Distortion   costValidList1   = MAX_DISTORTION;
 
     CPelUnitBuf origBuf = cu.cs->getOrgBuf( cu );
 
@@ -1058,6 +1112,8 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
     for ( int iRefList = 0; iRefList < iNumPredDir; iRefList++ )
     {
       RefPicList  refPicList = ( iRefList ? REF_PIC_LIST_1 : REF_PIC_LIST_0 );
+      std::cout << "--> PredInter for L" << iRefList << std::endl;
+
       for (int iRefIdxTemp = 0; iRefIdxTemp < cs.slice->numRefIdx[ refPicList ]; iRefIdxTemp++)
       {
         uiBitsTemp = uiMbBits[iRefList];
@@ -1131,17 +1187,25 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
           iRefIdx[iRefList] = iRefIdxTemp;
         }
 
-        if ( iRefList == 1 && uiCostTemp < costValidList1 && cs.slice->list1IdxToList0Idx[ iRefIdxTemp ] < 0 )
-        {
-          costValidList1 = uiCostTemp;
-          bitsValidList1 = uiBitsTemp;
+        // if ( iRefList == 1 && uiCostTemp < costValidList1 && cs.slice->list1IdxToList0Idx[ iRefIdxTemp ] < 0 )
+        // {
+        //   costValidList1 = uiCostTemp;
+        //   bitsValidList1 = uiBitsTemp;
 
-          // set motion
-          mvValidList1     = cMvTemp[iRefList][iRefIdxTemp];
-          refIdxValidList1 = iRefIdxTemp;
-        }
+        //   // set motion
+        //   mvValidList1     = cMvTemp[iRefList][iRefIdxTemp];
+        //   refIdxValidList1 = iRefIdxTemp;
+        // }
       }
     }
+
+    // NDP Optimization
+
+    // Mv mvL0ME = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMv[0]);
+    // Mv mvL1ME = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMv[1]);
+
+    // std::cout << "[AfterME] L0: " << NdpEncoderOptimizer::mvToStr(mvL0ME) << " [" << NdpEncoderOptimizer::getFracPosition(mvL0ME, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+    // std::cout << "[AfterME] L1: " << NdpEncoderOptimizer::mvToStr(mvL1ME) << " [" << NdpEncoderOptimizer::getFracPosition(mvL1ME, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
 
     ::memcpy(cMvHevcTemp, cMvTemp, sizeof(cMvTemp));
     if (cu.imv == 0 && (!cu.slice->sps->BCW || BcwIdx == BCW_DEFAULT))
@@ -1351,6 +1415,7 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
       }
 
       // SMVD
+      /*
       if( cs.slice->biDirPred )
       {
         double th1 = 1.02;
@@ -1520,7 +1585,22 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
           cMvPredBi[tarRefList][iRefIdxBi[tarRefList]] = cMvPredSym[tarRefList];
         }
       }
+      */
     } // if (B_SLICE)
+
+    // // NDP Optimization
+    // mvL0 = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMv[0]);
+    // mvL1 = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMv[1]);
+
+    // std::cout << "[AfterBi] L0: " << NdpEncoderOptimizer::mvToStr(mvL0) << " [" << NdpEncoderOptimizer::getFracPosition(mvL0, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+    // std::cout << "[AfterBi] L1: " << NdpEncoderOptimizer::mvToStr(mvL1) << " [" << NdpEncoderOptimizer::getFracPosition(mvL1, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+
+    // // NDP Optimization
+    // Mv mvL0Bi = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMvBi[0]);
+    // Mv mvL1Bi = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cMvBi[1]);
+
+    // std::cout << "[AfterBi] L0 Bi: " << NdpEncoderOptimizer::mvToStr(mvL0Bi) << " [" << NdpEncoderOptimizer::getFracPosition(mvL0Bi, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+    // std::cout << "[AfterBi] L1 Bi: " << NdpEncoderOptimizer::mvToStr(mvL1Bi) << " [" << NdpEncoderOptimizer::getFracPosition(mvL1Bi, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
 
       //  Clear Motion Field
     cu.mv [REF_PIC_LIST_0][0] = Mv();
@@ -1535,10 +1615,13 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
     cu.mvpNum[REF_PIC_LIST_1] = NOT_VALID;
 
     // Set Motion Field
+    /*
     cMv    [1] = mvValidList1;
     iRefIdx[1] = refIdxValidList1;
     uiBits [1] = bitsValidList1;
     uiCost [1] = costValidList1;
+    */
+
     if( enforceBcwPred )
     {
       uiCost[0] = uiCost[1] = MAX_UINT;
@@ -1585,6 +1668,15 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
       cu.mvpNum[REF_PIC_LIST_1] = aaiMvpNum[1][iRefIdx[1]];
       cu.interDir = 2;
     }
+
+    // // NDP Optimization
+    Mv mvL0 = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cu.mv[REF_PIC_LIST_0][0]);
+    Mv mvL1 = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cu.mv[REF_PIC_LIST_1][0]);
+
+    std::cout << "[BestInter] " << (cu.interDir == 3 ? "Bi-Prediction" : (cu.interDir == 1 ? "L0 Uni-Prediction" : (cu.interDir == 2 ? "L1 Uni-Prediction" : "[OTHER]") ) ) << std::endl;
+    std::cout << "[AfterBi] L0 Bi: " << NdpEncoderOptimizer::mvToStr(mvL0) << " [" << NdpEncoderOptimizer::getFracPosition(mvL0, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+    std::cout << "[AfterBi] L1 Bi: " << NdpEncoderOptimizer::mvToStr(mvL1) << " [" << NdpEncoderOptimizer::getFracPosition(mvL1, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+
 
     if( BcwIdx != BCW_DEFAULT )
     {
@@ -1791,6 +1883,16 @@ bool InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner, doub
     //  MC
     PelUnitBuf predBuf = cu.cs->getPredBuf(cu);
     motionCompensation( cu, predBuf, REF_PIC_LIST_X );
+
+    // NDP Optimization
+    // NDP Optimization
+    Mv mvL0Final = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cu.mv[0][0]);
+    Mv mvL1Final = NdpEncoderOptimizer::shiftMvFromInternalToQuarter(cu.mv[1][0]);
+
+
+    std::cout << "[FinInter] L0: " << NdpEncoderOptimizer::mvToStr(mvL0Final) << " [" << NdpEncoderOptimizer::getFracPosition(mvL0Final, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+    std::cout << "[FinInter] L1: " << NdpEncoderOptimizer::mvToStr(mvL1Final) << " [" << NdpEncoderOptimizer::getFracPosition(mvL1Final, MvPrecision::MV_PRECISION_QUARTER) << "]" << std::endl;
+
     puIdx++;
   }
 
@@ -2731,6 +2833,10 @@ void InterSearch::xPatternSearchFracDIF(
     rcMvQter += rcMvHalf;  rcMvQter <<= 1;
     ruiCost = xPatternRefinement( cStruct.pcPatternKey, baseRefMv, 1, rcMvQter, uiDistBest, patternId, &cPatternRoi, cStruct.useAltHpelIf );
   }
+
+  std::cout << "BestFracMV: [I] " << NdpEncoderOptimizer::mvToStr(rcMvInt) <<
+   " [H] " << NdpEncoderOptimizer::mvToStr(rcMvHalf) << 
+   " [Q] " << NdpEncoderOptimizer::mvToStr(rcMvQter) << "\n";
 
 }
 
